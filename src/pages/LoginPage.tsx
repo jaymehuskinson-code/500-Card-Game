@@ -16,23 +16,28 @@ export function LoginPage() {
     setError('');
 
     try {
-      // Generate a unique guest email/password — no real account needed
+      // Generate unique guest credentials
       const uid = crypto.randomUUID();
       const email = `guest_${uid}@500cardgame.guest`;
       const password = uid;
 
       const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
       if (signUpError) throw signUpError;
+      if (!data.user) throw new Error('No user returned');
 
-      // Update profile with display name
-      const { error: profileError } = await supabase.from('profiles')
-        .update({ display_name: name.trim() })
-        .eq('id', data.user!.id);
-      if (profileError) throw profileError;
+      // Manually upsert profile — don't rely on trigger timing
+      const { error: upsertError } = await supabase.from('profiles').upsert({
+        id: data.user.id,
+        display_name: name.trim(),
+        games_played: 0,
+        games_won: 0,
+      }, { onConflict: 'id' });
+      if (upsertError) throw upsertError;
 
       const { data: profile } = await supabase.from('profiles')
-        .select('*').eq('id', data.user!.id).single();
-      setProfile(profile);
+        .select('*').eq('id', data.user.id).single();
+      if (profile) setProfile(profile);
+
     } catch (e: any) {
       setError(e.message || 'Failed to sign in');
     } finally {
