@@ -12,25 +12,38 @@ export default function App() {
   const [gameId, setGameId] = useState<string | null>(null);
 
   useEffect(() => {
+    // Safety timeout — never stay on loading screen more than 4 seconds
+    const timeout = setTimeout(() => setLoading(false), 4000);
+
     supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) {
-        setUser({ id: session.user.id });
+      clearTimeout(timeout);
+      try {
+        if (session?.user) {
+          setUser({ id: session.user.id });
 
-        const { data: profile } = await supabase.from('profiles')
-          .select('*').eq('id', session.user.id).single();
-        if (profile) setProfile(profile);
+          const { data: profile } = await supabase.from('profiles')
+            .select('*').eq('id', session.user.id).single();
+          if (profile) setProfile(profile);
 
-        // Only reconnect to games that are actively in progress
-        const { data: gp } = await supabase.from('game_players')
-          .select('game_id, games!inner(phase)')
-          .eq('player_id', session.user.id)
-          .in('games.phase', ['bidding', 'kitty_exchange', 'trick_play', 'round_scoring'])
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          // Only reconnect to active in-progress games
+          const { data: gp } = await supabase.from('game_players')
+            .select('game_id, games!inner(phase)')
+            .eq('player_id', session.user.id)
+            .in('games.phase', ['bidding', 'kitty_exchange', 'trick_play', 'round_scoring'])
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
 
-        if (gp?.game_id) setGameId(gp.game_id);
+          if (gp?.game_id) setGameId(gp.game_id);
+        }
+      } catch (e) {
+        // Silently fail — just show login or lobby
+        console.warn('Session restore error:', e);
+      } finally {
+        setLoading(false);
       }
+    }).catch(() => {
+      clearTimeout(timeout);
       setLoading(false);
     });
 
@@ -47,13 +60,24 @@ export default function App() {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-felt flex items-center justify-center">
-        <div className="text-gold text-2xl font-display animate-pulse">Loading…</div>
+        <div className="flex flex-col items-center gap-4">
+          <div className="text-gold text-2xl font-display animate-pulse">Loading…</div>
+          <button
+            onClick={() => setLoading(false)}
+            className="text-gray-600 hover:text-gray-400 text-xs font-body transition mt-4"
+          >
+            Taking too long? Click here
+          </button>
+        </div>
       </div>
     );
   }
