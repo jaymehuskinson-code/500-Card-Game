@@ -1,5 +1,5 @@
 // src/pages/LobbyPage.tsx
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../lib/supabase';
 import { useGameStore } from '../lib/store';
@@ -11,71 +11,67 @@ interface LobbyPageProps {
 
 export function LobbyPage({ onJoinGame }: LobbyPageProps) {
   const { profile, user } = useGameStore();
-  const [view, setView] = useState<'main' | 'create' | 'waiting' | 'browse'>('main');
+  const [view, setView] = useState<'main'|'create'|'waiting'|'browse'>('main');
   const [gameName, setGameName] = useState('');
-  const [pendingGameId, setPendingGameId] = useState<string | null>(null);
+  const [pendingGameId, setPendingGameId] = useState<string|null>(null);
   const [pendingGame, setPendingGame] = useState<any>(null);
   const [pendingPlayers, setPendingPlayers] = useState<any[]>([]);
   const [openGames, setOpenGames] = useState<any[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // ── Load open games ───────────────────────────────────────
+  // ── Refresh waiting room ──────────────────────────────────
+  const refreshWaitingRoom = useCallback(async (gameId: string) => {
+    const [{ data: g }, { data: ps }] = await Promise.all([
+      supabase.from('games').select('*').eq('id', gameId).single(),
+      supabase.from('game_players').select('*, profiles(*)').eq('game_id', gameId),
+    ]);
+    if (g) setPendingGame(g);
+    setPendingPlayers(ps ?? []);
+    if (g && g.phase !== 'lobby') onJoinGame(gameId);
+  }, [onJoinGame]);
+
+  // ── Open games browser ────────────────────────────────────
   useEffect(() => {
     if (view !== 'browse') return;
-    const fetchGames = async () => {
-      const { data } = await supabase
-        .from('games').select('*, game_players(count)')
-        .eq('phase', 'lobby').order('created_at', { ascending: false }).limit(20);
+    const fetch = async () => {
+      const { data } = await supabase.from('games')
+        .select('*, game_players(count)').eq('phase', 'lobby')
+        .order('created_at', { ascending: false }).limit(20);
       setOpenGames(data ?? []);
     };
-    fetchGames();
-    const channel = supabase.channel('open-games')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'games' }, fetchGames)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_players' }, fetchGames)
+    fetch();
+    const ch = supabase.channel('open-games')
+      .on('postgres_changes', { event:'*', schema:'public', table:'games' }, fetch)
+      .on('postgres_changes', { event:'*', schema:'public', table:'game_players' }, fetch)
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    return () => { supabase.removeChannel(ch); };
   }, [view]);
 
-  // ── Realtime waiting room ─────────────────────────────────
+  // ── Waiting room realtime + poll ──────────────────────────
   useEffect(() => {
     if (!pendingGameId) return;
-    // Load initial players immediately
-    supabase.from('game_players').select('*, profiles(*)').eq('game_id', pendingGameId)
-      .then(({ data }) => setPendingPlayers(data ?? []));
-
-    const channel = supabase.channel(`lobby:${pendingGameId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'games', filter: `id=eq.${pendingGameId}` },
-        async () => {
-          const { data: g } = await supabase.from('games').select('*').eq('id', pendingGameId).single();
-          setPendingGame(g);
-          if (g?.phase !== 'lobby') onJoinGame(pendingGameId);
-        })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_players', filter: `game_id=eq.${pendingGameId}` },
-        async () => {
-          const { data: ps } = await supabase.from('game_players').select('*, profiles(*)').eq('game_id', pendingGameId);
-          setPendingPlayers(ps ?? []);
-        })
+    refreshWaitingRoom(pendingGameId);
+    const ch = supabase.channel(`lobby:${pendingGameId}`)
+      .on('postgres_changes', { event:'*', schema:'public', table:'game_players', filter:`game_id=eq.${pendingGameId}` },
+        () => refreshWaitingRoom(pendingGameId))
+      .on('postgres_changes', { event:'*', schema:'public', table:'games', filter:`id=eq.${pendingGameId}` },
+        () => refreshWaitingRoom(pendingGameId))
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [pendingGameId, onJoinGame]);
+    const poll = setInterval(() => refreshWaitingRoom(pendingGameId), 5000);
+    return () => { supabase.removeChannel(ch); clearInterval(poll); };
+  }, [pendingGameId, refreshWaitingRoom]);
 
   // ── Leave waiting room ────────────────────────────────────
-  const handleLeaveWaiting = async () => {
+  const handleLeave = async () => {
     if (!pendingGameId || !user) return;
     setLoading(true);
-    // Remove player from game
-    await supabase.from('game_players')
-      .delete().eq('game_id', pendingGameId).eq('player_id', user.id);
-    // If host left, delete the game entirely
+    await supabase.from('game_players').delete().eq('game_id', pendingGameId).eq('player_id', user.id);
     if (pendingGame?.host_id === user.id) {
       await supabase.from('games').delete().eq('id', pendingGameId);
     }
-    setPendingGameId(null);
-    setPendingGame(null);
-    setPendingPlayers([]);
-    setView('main');
-    setLoading(false);
+    setPendingGameId(null); setPendingGame(null); setPendingPlayers([]);
+    setView('main'); setLoading(false);
   };
 
   // ── Create game ───────────────────────────────────────────
@@ -84,14 +80,23 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
     if (!gameName.trim()) { setError('Please enter a game name'); return; }
     setLoading(true); setError('');
     try {
+      // Verify profile exists before creating game
+      const { data: prof } = await supabase.from('profiles').select('id').eq('id', user.id).single();
+      if (!prof) throw new Error('Profile not found — please sign out and sign in again');
+
       const { data: game, error: e } = await supabase.from('games')
         .insert({ host_id: user.id, phase: 'lobby', game_name: gameName.trim() })
         .select().single();
-      if (e) throw e;
-      await supabase.from('game_players').insert({ game_id: game.id, player_id: user.id, seat: 0 });
-      const { data: ps } = await supabase.from('game_players').select('*, profiles(*)').eq('game_id', game.id);
-      setPendingGame(game); setPendingPlayers(ps ?? []); setPendingGameId(game.id); setView('waiting');
-    } catch (e: any) { setError(e.message); }
+      if (e) throw new Error('Could not create game: ' + e.message);
+
+      const { error: je } = await supabase.from('game_players')
+        .insert({ game_id: game.id, player_id: user.id, seat: 0 });
+      if (je) throw new Error('Could not join game: ' + je.message);
+
+      setPendingGame(game); setPendingGameId(game.id); setView('waiting');
+    } catch (e: any) {
+      setError(e.message);
+    }
     setLoading(false);
   };
 
@@ -105,20 +110,22 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
       if (e || !game) throw new Error('Game not found');
       if (game.phase !== 'lobby') throw new Error('Game already started');
       if (game.game_players.length >= 4) throw new Error('Game is full');
+
       const alreadyIn = game.game_players.find((p: any) => p.player_id === user.id);
       if (!alreadyIn) {
-        const takenSeats = game.game_players.map((p: any) => p.seat);
-        const openSeat = [0,1,2,3].find(s => !takenSeats.includes(s))!;
-        await supabase.from('game_players').insert({ game_id: game.id, player_id: user.id, seat: openSeat });
+        const taken = game.game_players.map((p: any) => p.seat);
+        const openSeat = [0,1,2,3].find(s => !taken.includes(s))!;
+        const { error: je } = await supabase.from('game_players')
+          .insert({ game_id: game.id, player_id: user.id, seat: openSeat });
+        if (je) throw new Error('Could not join: ' + je.message);
       }
-      const { data: ps } = await supabase.from('game_players').select('*, profiles(*)').eq('game_id', game.id);
-      setPendingGame(game); setPendingPlayers(ps ?? []); setPendingGameId(game.id); setView('waiting');
+      setPendingGame(game); setPendingGameId(game.id); setView('waiting');
     } catch (e: any) { setError(e.message); }
     setLoading(false);
   };
 
   // ── Start game ────────────────────────────────────────────
-  const handleStartGame = async () => {
+  const handleStart = async () => {
     if (!pendingGameId) return;
     setLoading(true); setError('');
     const { error: e } = await dealCards(pendingGameId);
@@ -142,7 +149,7 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
       <div className="absolute inset-0 felt-texture pointer-events-none opacity-30" />
       <AnimatePresence mode="wait">
 
-        {/* ── MAIN ── */}
+        {/* MAIN */}
         {view === 'main' && (
           <motion.div key="main" initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }}
             exit={{ opacity:0, scale:0.95 }} className="relative z-10 w-full max-w-md">
@@ -155,8 +162,8 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                 ))}
               </div>
               <div className="space-y-3">
-                <button onClick={() => { setView('create'); setError(''); }}
-                  className="w-full bg-gold text-black font-display font-bold py-4 rounded-xl text-lg hover:bg-gold/90 transition shadow-lg shadow-gold/20 tracking-wide">
+                <button onClick={() => { setView('create'); setError(''); setGameName(''); }}
+                  className="w-full bg-gold text-black font-display font-bold py-4 rounded-xl text-lg hover:bg-gold/90 transition shadow-lg shadow-gold/20">
                   Create New Game
                 </button>
                 <button onClick={() => { setView('browse'); setError(''); }}
@@ -170,19 +177,20 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
           </motion.div>
         )}
 
-        {/* ── CREATE ── */}
+        {/* CREATE */}
         {view === 'create' && (
           <motion.div key="create" initial={{ opacity:0, x:40 }} animate={{ opacity:1, x:0 }}
             exit={{ opacity:0, x:-40 }} className="relative z-10 w-full max-w-sm">
             <div className="bg-table-dark border border-gold/30 rounded-2xl shadow-2xl p-8">
               <button onClick={() => setView('main')}
-                className="text-gray-500 hover:text-gray-300 mb-6 flex items-center gap-1 text-sm transition font-body">← Back</button>
+                className="text-gray-500 hover:text-gray-300 mb-6 flex items-center gap-1 text-sm font-body">← Back</button>
               <h2 className="text-2xl font-display text-gold mb-6">Create Game</h2>
               <label className="block text-gray-300 text-sm mb-1.5 font-body">Game name</label>
               <input type="text" value={gameName} onChange={e => setGameName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCreate()}
-                placeholder="e.g. Friday Night 500" maxLength={30}
-                className="w-full bg-black/30 border border-white/10 text-white rounded-lg px-4 py-3 focus:outline-none focus:border-gold/60 placeholder-gray-600 mb-4 font-body" />
+                placeholder="e.g. Friday Night 500" maxLength={30} autoFocus
+                className="w-full bg-black/30 border border-white/10 text-white rounded-lg px-4 py-3
+                  focus:outline-none focus:border-gold/60 placeholder-gray-600 mb-4 font-body" />
               {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
               <button onClick={handleCreate} disabled={loading || !gameName.trim()}
                 className="w-full bg-gold text-black font-display font-bold py-3 rounded-lg text-lg hover:bg-gold/90 disabled:opacity-40 transition">
@@ -192,13 +200,13 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
           </motion.div>
         )}
 
-        {/* ── BROWSE ── */}
+        {/* BROWSE */}
         {view === 'browse' && (
           <motion.div key="browse" initial={{ opacity:0, x:40 }} animate={{ opacity:1, x:0 }}
             exit={{ opacity:0, x:-40 }} className="relative z-10 w-full max-w-lg">
             <div className="bg-table-dark border border-gold/30 rounded-2xl shadow-2xl p-8">
               <button onClick={() => setView('main')}
-                className="text-gray-500 hover:text-gray-300 mb-6 flex items-center gap-1 text-sm transition font-body">← Back</button>
+                className="text-gray-500 hover:text-gray-300 mb-6 flex items-center gap-1 text-sm font-body">← Back</button>
               <h2 className="text-2xl font-display text-gold mb-6">Open Games</h2>
               {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
               {openGames.length === 0 ? (
@@ -210,17 +218,17 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
               ) : (
                 <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
                   {openGames.map(game => {
-                    const playerCount = game.game_players?.[0]?.count ?? game.game_players?.length ?? 0;
-                    const isFull = playerCount >= 4;
+                    const count = game.game_players?.[0]?.count ?? 0;
+                    const isFull = count >= 4;
                     return (
                       <div key={game.id} className="flex items-center justify-between bg-black/30 rounded-xl px-4 py-3 border border-white/5">
                         <div>
                           <p className="text-white font-display">{game.game_name || 'Unnamed Game'}</p>
-                          <p className="text-gray-500 text-xs font-body mt-0.5">{playerCount}/4 players · Code: {game.room_code}</p>
+                          <p className="text-gray-500 text-xs font-body mt-0.5">{count}/4 players · {game.room_code}</p>
                         </div>
                         <button onClick={() => !isFull && handleJoin(game.id)} disabled={isFull || loading}
                           className={`px-4 py-2 rounded-lg font-display text-sm transition ${isFull ? 'bg-gray-800 text-gray-600 cursor-not-allowed' : 'bg-gold text-black hover:bg-gold/90'}`}>
-                          {isFull ? 'Full' : 'Join'}
+                          {isFull ? 'Full' : loading ? '...' : 'Join'}
                         </button>
                       </div>
                     );
@@ -235,22 +243,22 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
           </motion.div>
         )}
 
-        {/* ── WAITING ROOM ── */}
+        {/* WAITING ROOM */}
         {view === 'waiting' && pendingGame && (
           <motion.div key="waiting" initial={{ opacity:0, y:20 }} animate={{ opacity:1, y:0 }}
             className="relative z-10 w-full max-w-lg">
             <div className="bg-table-dark border border-gold/30 rounded-2xl shadow-2xl p-8">
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between mb-4">
                 <div>
                   <h2 className="text-2xl font-display text-gold">{pendingGame.game_name || 'Game Lobby'}</h2>
-                  <p className="text-gray-500 text-sm font-body">Share the room code with friends</p>
+                  <p className="text-gray-500 text-sm font-body">Share code with friends</p>
                 </div>
                 <div className="text-2xl font-display text-white tracking-widest bg-black/40 px-4 py-2 rounded-lg border border-white/10">
                   {pendingGame.room_code}
                 </div>
               </div>
 
-              {/* Live seat diagram */}
+              {/* Seat diagram */}
               <div className="relative bg-felt rounded-xl mb-6 aspect-[4/3]">
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="w-24 h-16 rounded-xl border-2 border-gold/20 bg-black/20 flex items-center justify-center">
@@ -261,7 +269,8 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                   const player = pendingPlayers.find((p: any) => p.seat === seat);
                   return (
                     <div key={seat} className={`absolute ${seatPositions[seat]}`}>
-                      <motion.div initial={{ scale:0.8, opacity:0 }} animate={{ scale:1, opacity:1 }}
+                      <motion.div key={player?.player_id ?? `empty-${seat}`}
+                        initial={{ scale:0.8, opacity:0 }} animate={{ scale:1, opacity:1 }}
                         className={`text-center px-3 py-2 rounded-lg min-w-[90px] ${player ? 'bg-black/60 border border-white/20' : 'border border-dashed border-white/10'}`}>
                         {player ? (
                           <>
@@ -270,7 +279,7 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                             {player.player_id === user?.id && <div className="text-gold text-xs">(you)</div>}
                           </>
                         ) : (
-                          <div className="text-gray-600 text-xs font-body px-2 py-1">Waiting...</div>
+                          <div className="text-gray-600 text-xs font-body px-2 py-2">Waiting...</div>
                         )}
                       </motion.div>
                     </div>
@@ -278,7 +287,7 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                 })}
               </div>
 
-              {/* Player count dots */}
+              {/* Dots */}
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                   {[0,1,2,3].map(i => (
@@ -287,15 +296,15 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                   <span className="text-gray-400 font-body text-sm ml-1">{pendingPlayers.length}/4</span>
                 </div>
                 <span className="text-gray-500 text-sm font-body">
-                  {isHost ? (canStart ? '✓ Ready!' : 'Waiting for players...') : 'Waiting for host...'}
+                  {isHost ? (canStart ? '✓ Ready!' : 'Waiting...') : 'Waiting for host...'}
                 </span>
               </div>
 
-              {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+              {error && <p className="text-red-400 text-sm mb-3 text-center">{error}</p>}
 
               {isHost ? (
-                <button onClick={handleStartGame} disabled={!canStart || loading}
-                  className="w-full bg-gold text-black font-display font-bold py-4 rounded-xl text-xl hover:bg-gold/90 disabled:opacity-30 transition shadow-lg shadow-gold/20 tracking-wide">
+                <button onClick={handleStart} disabled={!canStart || loading}
+                  className="w-full bg-gold text-black font-display font-bold py-4 rounded-xl text-xl hover:bg-gold/90 disabled:opacity-30 transition shadow-lg shadow-gold/20">
                   {loading ? 'Starting...' : 'Start Game'}
                 </button>
               ) : (
@@ -305,8 +314,7 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                 </motion.div>
               )}
 
-              {/* Leave button */}
-              <button onClick={handleLeaveWaiting} disabled={loading}
+              <button onClick={handleLeave} disabled={loading}
                 className="w-full mt-3 py-2 text-gray-600 hover:text-red-400 text-sm font-body transition text-center">
                 {isHost ? 'Cancel & delete game' : 'Leave game'}
               </button>

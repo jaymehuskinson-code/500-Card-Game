@@ -16,30 +16,32 @@ export function LoginPage() {
     setError('');
 
     try {
-      // Generate unique guest credentials
       const uid = crypto.randomUUID();
       const email = `guest_${uid}@500cardgame.guest`;
       const password = uid;
 
+      // Step 1: Sign up
       const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
       if (signUpError) throw signUpError;
-      if (!data.user) throw new Error('No user returned');
+      if (!data.user) throw new Error('Signup failed — no user returned');
 
-      // Manually upsert profile — don't rely on trigger timing
-      const { error: upsertError } = await supabase.from('profiles').upsert({
+      // Step 2: Upsert profile BEFORE anything else (avoids FK violations)
+      const { error: profileError } = await supabase.from('profiles').upsert({
         id: data.user.id,
         display_name: name.trim(),
         games_played: 0,
         games_won: 0,
       }, { onConflict: 'id' });
-      if (upsertError) throw upsertError;
+      if (profileError) throw new Error('Could not save profile: ' + profileError.message);
 
-      const { data: profile } = await supabase.from('profiles')
+      // Step 3: Read back profile to confirm
+      const { data: profile, error: readError } = await supabase.from('profiles')
         .select('*').eq('id', data.user.id).single();
-      if (profile) setProfile(profile);
+      if (readError || !profile) throw new Error('Could not read profile');
 
+      setProfile(profile);
     } catch (e: any) {
-      setError(e.message || 'Failed to sign in');
+      setError(e.message || 'Failed to sign in — please try again');
     } finally {
       setLoading(false);
     }
@@ -48,66 +50,45 @@ export function LoginPage() {
   return (
     <div className="min-h-screen bg-felt flex items-center justify-center p-4">
       <div className="absolute inset-0 felt-texture pointer-events-none opacity-30" />
-
-      <motion.div
-        initial={{ opacity: 0, y: 32 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6, ease: 'easeOut' }}
-        className="relative z-10 w-full max-w-sm"
-      >
+      <motion.div initial={{ opacity:0, y:32 }} animate={{ opacity:1, y:0 }}
+        transition={{ duration:0.6, ease:'easeOut' }} className="relative z-10 w-full max-w-sm">
         <div className="bg-table-dark border border-gold/30 rounded-2xl shadow-2xl shadow-black/60 p-8">
           <div className="text-center mb-8">
             <div className="flex justify-center gap-2 mb-3">
-              {['♠', '♥', '♦', '♣'].map((s, i) => (
-                <motion.span key={s} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.1 }}
-                  className={`text-3xl ${s === '♥' || s === '♦' ? 'text-red-400' : 'text-gray-200'}`}>
-                  {s}
+              {['♠','♥','♦','♣'].map((s,i) => (
+                <motion.span key={s} initial={{ opacity:0, y:-10 }} animate={{ opacity:1, y:0 }}
+                  transition={{ delay: i*0.1 }}
+                  className={`text-3xl ${s==='♥'||s==='♦'?'text-red-400':'text-gray-200'}`}>{s}
                 </motion.span>
               ))}
             </div>
             <h1 className="text-4xl font-display text-gold tracking-widest">500</h1>
             <p className="text-gray-400 text-sm mt-1 font-body">The Card Game</p>
           </div>
-
           <div className="space-y-4">
             <div>
               <label className="block text-gray-300 text-sm mb-1.5 font-body">Your display name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={e => setName(e.target.value)}
+              <input type="text" value={name} onChange={e => setName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleStart()}
-                placeholder="Enter your name..."
-                maxLength={20}
-                autoFocus
+                placeholder="Enter your name..." maxLength={20} autoFocus
                 className="w-full bg-black/30 border border-white/10 text-white rounded-lg px-4 py-3
                   focus:outline-none focus:border-gold/60 focus:ring-1 focus:ring-gold/30
-                  placeholder-gray-600 transition font-body"
-              />
+                  placeholder-gray-600 transition font-body" />
             </div>
-
             {error && (
-              <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-400 text-sm">
+              <motion.p initial={{ opacity:0 }} animate={{ opacity:1 }} className="text-red-400 text-sm">
                 {error}
               </motion.p>
             )}
-
-            <motion.button
-              whileTap={{ scale: 0.97 }}
-              onClick={handleStart}
+            <motion.button whileTap={{ scale:0.97 }} onClick={handleStart}
               disabled={loading || name.trim().length < 2}
               className="w-full bg-gold text-black font-bold py-3 rounded-lg text-lg
                 hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed
-                transition shadow-lg shadow-gold/20 font-display tracking-wide"
-            >
+                transition shadow-lg shadow-gold/20 font-display tracking-wide">
               {loading ? 'Entering...' : 'Enter the Table'}
             </motion.button>
           </div>
-
-          <p className="text-center text-gray-600 text-xs mt-6 font-body">
-            No account needed · Guest session
-          </p>
+          <p className="text-center text-gray-600 text-xs mt-6 font-body">No account needed · Guest session</p>
         </div>
       </motion.div>
     </div>
