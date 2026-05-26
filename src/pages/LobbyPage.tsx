@@ -171,7 +171,11 @@ export function LobbyPage({ onJoinGame }: LobbyPageProps) {
                   Browse Open Games
                 </button>
               </div>
-              <button onClick={() => supabase.auth.signOut()}
+              <button onClick={async () => {
+                  await supabase.auth.signOut();
+                  useGameStore.getState().setUser(null);
+                  useGameStore.getState().setProfile(null);
+                }}
                 className="mt-6 text-gray-600 hover:text-gray-400 text-sm transition font-body">Sign out</button>
             </div>
           </motion.div>
