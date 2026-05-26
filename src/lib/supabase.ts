@@ -131,25 +131,4 @@ export interface GameEvent {
   created_at: string;
 }
 
-// ============================================================
-// EDGE FUNCTION HELPERS
-// ============================================================
-
-export async function callEdgeFunction(name: string, body: Record<string, any>) {
-  const session = await supabase.auth.getSession();
-  const token = session.data.session?.access_token;
-
-  const res = await fetch(`${supabaseUrl}/functions/v1/${name}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      apikey: supabaseAnonKey,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Edge function error');
-  return data;
-}
+// No edge functions — all game logic runs via direct Supabase calls in gameActions.ts

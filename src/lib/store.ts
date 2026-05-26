@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
-  supabase, Game, GamePlayer, Round, Bid, Trick, Hand, GameEvent, Profile, callEdgeFunction
+  supabase, Game, GamePlayer, Round, Bid, Trick, Hand, GameEvent, Profile
 } from './supabase';
 
 interface GameState {
