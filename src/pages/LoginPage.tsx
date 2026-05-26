@@ -16,15 +16,18 @@ export function LoginPage() {
     setError('');
 
     try {
-      // Sign in anonymously (Supabase anon auth)
-      const { data, error: signInError } = await supabase.auth.signInAnonymously();
-      if (signInError) throw signInError;
+      // Generate a unique guest email/password — no real account needed
+      const uid = crypto.randomUUID();
+      const email = `guest_${uid}@500cardgame.guest`;
+      const password = uid;
+
+      const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
+      if (signUpError) throw signUpError;
 
       // Update profile with display name
       const { error: profileError } = await supabase.from('profiles')
         .update({ display_name: name.trim() })
         .eq('id', data.user!.id);
-
       if (profileError) throw profileError;
 
       const { data: profile } = await supabase.from('profiles')
@@ -39,7 +42,6 @@ export function LoginPage() {
 
   return (
     <div className="min-h-screen bg-felt flex items-center justify-center p-4">
-      {/* Background felt texture */}
       <div className="absolute inset-0 felt-texture pointer-events-none opacity-30" />
 
       <motion.div
@@ -48,19 +50,13 @@ export function LoginPage() {
         transition={{ duration: 0.6, ease: 'easeOut' }}
         className="relative z-10 w-full max-w-sm"
       >
-        {/* Card */}
         <div className="bg-table-dark border border-gold/30 rounded-2xl shadow-2xl shadow-black/60 p-8">
-          {/* Logo */}
           <div className="text-center mb-8">
             <div className="flex justify-center gap-2 mb-3">
               {['♠', '♥', '♦', '♣'].map((s, i) => (
-                <motion.span
-                  key={s}
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
+                <motion.span key={s} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: i * 0.1 }}
-                  className={`text-3xl ${s === '♥' || s === '♦' ? 'text-red-400' : 'text-gray-200'}`}
-                >
+                  className={`text-3xl ${s === '♥' || s === '♦' ? 'text-red-400' : 'text-gray-200'}`}>
                   {s}
                 </motion.span>
               ))}
@@ -69,7 +65,6 @@ export function LoginPage() {
             <p className="text-gray-400 text-sm mt-1 font-body">The Card Game</p>
           </div>
 
-          {/* Form */}
           <div className="space-y-4">
             <div>
               <label className="block text-gray-300 text-sm mb-1.5 font-body">Your display name</label>
@@ -80,6 +75,7 @@ export function LoginPage() {
                 onKeyDown={e => e.key === 'Enter' && handleStart()}
                 placeholder="Enter your name..."
                 maxLength={20}
+                autoFocus
                 className="w-full bg-black/30 border border-white/10 text-white rounded-lg px-4 py-3
                   focus:outline-none focus:border-gold/60 focus:ring-1 focus:ring-gold/30
                   placeholder-gray-600 transition font-body"
@@ -87,11 +83,7 @@ export function LoginPage() {
             </div>
 
             {error && (
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-red-400 text-sm"
-              >
+              <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-400 text-sm">
                 {error}
               </motion.p>
             )}

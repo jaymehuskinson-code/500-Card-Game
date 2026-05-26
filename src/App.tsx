@@ -12,24 +12,24 @@ export default function App() {
   const [gameId, setGameId] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check persisted session
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
         setUser({ id: session.user.id });
+
         const { data: profile } = await supabase.from('profiles')
           .select('*').eq('id', session.user.id).single();
         if (profile) setProfile(profile);
 
-        // Check if in active game
+        // Only reconnect to games that are actively in progress
         const { data: gp } = await supabase.from('game_players')
-          .select('game_id, games(phase)')
+          .select('game_id, games!inner(phase)')
           .eq('player_id', session.user.id)
-          .not('games.phase', 'eq', 'game_over')
+          .in('games.phase', ['bidding', 'kitty_exchange', 'trick_play', 'round_scoring'])
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle();
 
-        if (gp && gp.game_id) setGameId(gp.game_id);
+        if (gp?.game_id) setGameId(gp.game_id);
       }
       setLoading(false);
     });

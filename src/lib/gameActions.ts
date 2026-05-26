@@ -122,6 +122,7 @@ export async function dealCards(gameId: string): Promise<{ error?: string }> {
     const { data: game } = await supabase.from('games')
       .select('*, game_players(*)').eq('id', gameId).single();
     if (!game) return { error: 'Game not found' };
+    if (game.game_players.length !== 4) return { error: 'Need exactly 4 players to deal' };
 
     const roundNumber = game.current_round + 1;
     const dealerSeat = game.dealer_seat !== null ? (game.dealer_seat + 1) % 4 : 0;
@@ -280,8 +281,14 @@ export async function placeBid(
         payload: { seat: winningBid.seat, value: winningBid.bid_value, trump: contractTrump },
       });
     } else {
-      // Advance turn
-      const nextSeat = (player.seat + 1) % 4;
+      // Advance turn — skip passed players
+      const passedSeats = new Set(allBids.filter((b: any) => b.bid_type === 'pass').map((b: any) => b.seat));
+      let nextSeat = (player.seat + 1) % 4;
+      let loops = 0;
+      while (passedSeats.has(nextSeat) && loops < 4) {
+        nextSeat = (nextSeat + 1) % 4;
+        loops++;
+      }
       const updates: any = { current_turn_seat: nextSeat };
       if (type !== 'pass') {
         updates.contract_bid_value = bidValue;
