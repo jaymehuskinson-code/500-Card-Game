@@ -85,12 +85,20 @@ export function HomePage({ onJoinGame }: HomePageProps) {
         const { data, error: e } = await supabase.auth.signUp({
           email: emailInput.trim().toLowerCase(),
           password: passwordInput,
+          options: { data: { display_name: nameInput.trim() } },
         });
         if (e) throw e;
-        if (!data.user) throw new Error('Signup failed');
+        if (!data.user) throw new Error('Signup failed — email may already be in use');
         userId = data.user.id;
 
-        // Upsert profile with display name
+        // Sign in to establish session before upsert
+        const { error: si } = await supabase.auth.signInWithPassword({
+          email: emailInput.trim().toLowerCase(),
+          password: passwordInput,
+        });
+        if (si) throw new Error('Could not establish session: ' + si.message);
+
+        // Upsert profile now that we have an active session
         const { error: pe } = await supabase.from('profiles').upsert({
           id: userId,
           display_name: nameInput.trim(),
@@ -109,10 +117,10 @@ export function HomePage({ onJoinGame }: HomePageProps) {
         userId = data.user.id;
       }
 
-      // Wait for profile to exist (DB trigger may lag slightly)
+      // Wait for profile (max 2s)
       let prof = null;
-      for (let i = 0; i < 10; i++) {
-        const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+      for (let i = 0; i < 5; i++) {
+        const { data } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
         if (data) { prof = data; break; }
         await new Promise(r => setTimeout(r, 400));
       }
