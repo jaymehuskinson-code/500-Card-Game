@@ -109,7 +109,14 @@ export function HomePage({ onJoinGame }: HomePageProps) {
         userId = data.user.id;
       }
 
-      const { data: prof } = await supabase.from('profiles').select('*').eq('id', userId).single();
+      // Wait for profile to exist (DB trigger may lag slightly)
+      let prof = null;
+      for (let i = 0; i < 10; i++) {
+        const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+        if (data) { prof = data; break; }
+        await new Promise(r => setTimeout(r, 400));
+      }
+      if (!prof) throw new Error('Profile not ready — please try again');
       setUser({ id: userId });
       setProfile(prof);
 
